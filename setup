@@ -1,0 +1,277 @@
+#!/bin/bash
+
+set -e
+
+# --- INSTALAR ANSIBLE ---
+echo "🔧 Instalando Ansible..."
+sudo apt update && sudo apt upgrade -y
+sudo apt install -y software-properties-common
+sudo apt-add-repository --yes --update ppa:ansible/ansible
+sudo apt install -y ansible
+
+# --- DEFINIR ESTRUCTURA DE ROLES ---
+BASE_DIR="$(pwd)/vm-setup"
+ROLES_DIR="$BASE_DIR/roles"
+
+mkdir -p "$ROLES_DIR"
+
+declare -A role_tasks
+
+role_tasks["nginx_load_balancer"]='
+- name: Instalar NGINX
+  apt:
+    name: nginx
+    state: present
+    update_cache: yes
+
+- name: Configurar NGINX como balanceador de carga
+  copy:
+    dest: /etc/nginx/sites-available/default
+    content: |
+      upstream backend {
+          server 127.0.0.1:8081;
+          server 127.0.0.1:8082;
+      }
+
+      server {
+          listen 80;
+          location / {
+              proxy_pass http://backend;
+          }
+      }
+  notify: Restart nginx
+
+- name: Asegurar que NGINX esté habilitado y activo
+  systemd:
+    name: nginx
+    enabled: yes
+    state: restarted
+'
+
+role_tasks["docker_cluster"]='
+- name: Instalar Docker
+  apt:
+    name: docker.io
+    state: present
+    update_cache: yes
+
+- name: Habilitar Docker
+  systemd:
+    name: docker
+    enabled: yes
+    state: started
+
+- name: Crear directorio /opt/custom-html
+  file:
+    path: /opt/custom-html
+    state: directory
+    mode: "0755"
+
+- name: Crear directorio compartido con HTML
+  copy:
+    content: |
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Bienvenido a su pagina de Ansible</title>
+        <style>
+          body {
+            font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(to right, #e0eafc, #cfdef3);
+            margin: 0;
+            padding: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+          }
+          .container {
+            background: white;
+            padding: 40px;
+            border-radius: 12px;
+            box-shadow: 0 8px 20px rgba(0,0,0,0.1);
+            text-align: center;
+          }
+          h1 {
+            color: #333;
+            margin-bottom: 10px;
+          }
+          p {
+            color: #555;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <h1>🚀 Ansible listo!</h1>
+          <p>Ansible es una herramienta que facilita la gestión de infraestructura al automatizar tareas como la instalación, configuración y despliegue de servicios. Contribuye a la alta disponibilidad al configurar sistemas redundantes y escalables.</p>
+          <p>En conjunto, Ansible permite una infraestructura más estable, segura y fácil de mantener.</p>
+        </div>
+      </body>
+      </html>
+    dest: "/opt/custom-html/index.html"
+    mode: "0644"
+
+- name: Crear contenedores con HTML personalizado
+  docker_container:
+    name: "app{{ item }}"
+    image: nginx
+    state: started
+    published_ports:
+      - "808{{ item }}:80"
+    volumes:
+      - "/opt/custom-html/index.html:/usr/share/nginx/html/index.html:ro"
+  loop: [1, 2]
+'
+
+role_tasks["performance"]='
+- name: Optimizar parámetros de red con sysctl
+  sysctl:
+    name: "{{ item.name }}"
+    value: "{{ item.value }}"
+    state: present
+    reload: yes
+  loop:
+    - { name: "net.core.somaxconn", value: "1024" }
+    - { name: "net.ipv4.tcp_tw_reuse", value: "1" }
+
+- name: Habilitar caché de NGINX
+  lineinfile:
+    path: /etc/nginx/nginx.conf
+    regexp: "^#?proxy_cache_path"
+    line: "proxy_cache_path /var/cache/nginx levels=1:2 keys_zone=my_cache:10m;"
+    insertafter: "^http {"
+  notify: Restart nginx
+'
+
+role_tasks["automation"]='
+- name: Crear cron job de mantenimiento
+  cron:
+    name: "Actualizar paquetes cada noche"
+    user: root
+    minute: "0"
+    hour: "2"
+    job: "apt update && apt upgrade -y"
+'
+
+role_tasks["security"]='
+- name: Instalar UFW y fail2ban
+  apt:
+    name: "{{ item }}"
+    state: present
+  loop:
+    - ufw
+    - fail2ban
+
+- name: Permitir solo puertos esenciales con UFW
+  ufw:
+    rule: allow
+    port: "{{ item }}"
+  loop:
+    - "22"
+    - "80"
+    - "443"
+
+- name: Habilitar UFW
+  ufw:
+    state: enabled
+
+- name: Activar y habilitar fail2ban
+  systemd:
+    name: fail2ban
+    state: started
+    enabled: yes
+
+- name: Activar actualizaciones automáticas
+  apt:
+    name: unattended-upgrades
+    state: present
+'
+
+role_tasks["version_control"]='
+- name: Instalar Git
+  apt:
+    name: git
+    state: present
+
+- name: Configurar nombre de usuario Git
+  git_config:
+    name: user.name
+    value: "vboxuser"
+    scope: global
+
+- name: Configurar email de Git
+  git_config:
+    name: user.email
+    value: "vboxuser@example.com"
+    scope: global
+'
+
+role_tasks["documentation"]='
+- name: Crear README.md en /opt
+  copy:
+    dest: /opt/README.md
+    content: |
+      # Servidor Configurado con Ansible
+      Este servidor ha sido configurado automáticamente usando Ansible con los siguientes roles:
+      - Alta disponibilidad (NGINX)
+      - Escalabilidad (Docker)
+      - Rendimiento (Tuning y caché)
+      - Automatización (cron jobs)
+      - Seguridad (UFW, fail2ban)
+      - Versionamiento (Git)
+      - Documentación y logging
+
+- name: Crear carpeta para logs centralizados
+  file:
+    path: /var/log/ansible/
+    state: directory
+    mode: "0755"
+
+- name: Registrar un log de instalación
+  copy:
+    content: "Instalación finalizada con éxito en {{ ansible_date_time.date }} a las {{ ansible_date_time.time }}\n"
+    dest: /var/log/ansible/deployment.log
+    mode: "0644"
+'
+
+ROLES=(${!role_tasks[@]})
+
+echo "📁 Generando roles..."
+for ROLE in "${ROLES[@]}"; do
+  echo "🛠 Rol: $ROLE"
+  ansible-galaxy init "$ROLES_DIR/$ROLE" --offline > /dev/null
+
+  echo "${role_tasks[$ROLE]}" > "$ROLES_DIR/$ROLE/tasks/main.yml"
+
+  if [[ "$ROLE" == "nginx_load_balancer" ]]; then
+    mkdir -p "$ROLES_DIR/$ROLE/handlers"
+    cat > "$ROLES_DIR/$ROLE/handlers/main.yml" <<EOF
+---
+- name: Restart nginx
+  systemd:
+    name: nginx
+    state: restarted
+EOF
+  fi
+
+done
+
+# Crear playbook principal
+echo "📄 Generando playbook..."
+cat > "$BASE_DIR/playbook.yml" <<EOF
+---
+- name: Configurar servidor completo
+  hosts: localhost
+  become: yes
+
+  roles:
+$(for r in "${ROLES[@]}"; do echo "    - $r"; done)
+EOF
+
+# Ejecutar el playbook
+cd "$BASE_DIR"
+echo "🚀 Ejecutando Ansible..."
+ansible-playbook playbook.yml -i "localhost," --connection=local
